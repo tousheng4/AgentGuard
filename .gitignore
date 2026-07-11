@@ -1,0 +1,55 @@
+# Python 字节码
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python 虚拟环境
+.venv/
+
+# 测试、格式化和类型检查缓存
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+coverage.xml
+htmlcov/
+
+# 本地环境变量和密钥
+.env
+.env.*
+!.env.example
+
+# AgentGuard 运行时数据
+data/*
+!data/.gitkeep
+
+workspaces/*
+!workspaces/.gitkeep
+
+# SQLite 数据库
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# 日志和临时文件
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+
+# 构建产物
+build/
+dist/
+*.egg-info/
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
