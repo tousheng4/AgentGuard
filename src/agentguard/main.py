@@ -1,11 +1,13 @@
-from fastapi import FastAPI
 import uvicorn
+from fastapi import FastAPI
 
 from agentguard.api.sandbox import router as sandbox_router
+from agentguard.api.tools import router as tools_router
 
 app = FastAPI(title="AgentGuard", version="0.1.0")
 
 app.include_router(sandbox_router)
+app.include_router(tools_router)
 
 
 @app.get("/health")

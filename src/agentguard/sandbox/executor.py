@@ -1,12 +1,20 @@
-import os, logging
+import logging
+import os
+from typing import Any
 
-import docker
-from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from docker.errors import (  # type: ignore[import-not-found]
+    APIError,
+    DockerException,
+    ImageNotFound,
+    NotFound,
+)
 from requests.exceptions import ReadTimeout
 
+import docker
 from agentguard.sandbox.models import SandboxRunResult
 
 logger = logging.getLogger(__name__)
+
 
 class SandboxExecutionError(RuntimeError):
     """Sandbox 创建或执行失败。"""
@@ -15,20 +23,24 @@ class SandboxExecutionError(RuntimeError):
 class SandboxTimeoutError(SandboxExecutionError):
     """Sandbox 执行超时。"""
 
+
 class SandboxExecutor:
     def __init__(self, image: str | None = None) -> None:
-        self._image = image or os.environ.get("AGENTGUARD_SANDBOX_IMAGE", "agentguard-sandbox:latest")
-        self._client = docker.from_env()
+        self._image = image or os.environ.get(
+            "AGENTGUARD_SANDBOX_IMAGE",
+            "agentguard-sandbox:latest",
+        )
+        self._client: Any = docker.from_env()  # type: ignore[attr-defined]
 
     def ping(self) -> bool:
-        return self._client.ping()
+        return bool(self._client.ping())
 
     def run(self, argv: list[str], timeout_seconds: int) -> SandboxRunResult:
         if not argv:
             raise ValueError("argv must not be empty")
-        
+
         container = None
-        
+
         try:
             container = self._client.containers.create(
                 image=self._image,
@@ -67,7 +79,7 @@ class SandboxExecutor:
                     "agentguard.managed": "true",
                 },
             )
-            
+
             container.start()
 
             wait_result = container.wait(timeout=timeout_seconds)
@@ -80,12 +92,14 @@ class SandboxExecutor:
                 stdout=stdout,
                 stderr=stderr,
             )
-        
+
         except ReadTimeout as e:
             if container is not None:
                 container.kill()
-            raise SandboxTimeoutError(f"Sandbox execution timed out after {timeout_seconds} seconds") from e
-        
+            raise SandboxTimeoutError(
+                f"Sandbox execution timed out after {timeout_seconds} seconds"
+            ) from e
+
         except ImageNotFound as e:
             raise SandboxExecutionError(f"Sandbox image '{self._image}' not found") from e
 
