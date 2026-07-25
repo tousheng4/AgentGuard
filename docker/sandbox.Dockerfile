@@ -1,13 +1,13 @@
-FROM debian:bookworm-slim
+FROM python:3.11-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/opt
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
-        python3 \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 10001 sandbox \
@@ -24,4 +24,8 @@ USER 10001:10001
 
 WORKDIR /workspace
 
-CMD ["python3", "-c", "print('sandbox ready')"]
+COPY src/agentguard /opt/agentguard
+
+EXPOSE 44772
+
+CMD ["python", "-m", "agentguard.execd.server"]

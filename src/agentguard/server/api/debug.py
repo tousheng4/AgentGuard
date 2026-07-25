@@ -1,7 +1,11 @@
 from fastapi import APIRouter, HTTPException
 
-from agentguard.sandbox.executor import SandboxExecutionError, SandboxExecutor, SandboxTimeoutError
-from agentguard.sandbox.models import SandboxRunRequest, SandboxRunResult
+from agentguard.server.sandbox.executor import (
+    SandboxExecutionError,
+    SandboxExecutor,
+    SandboxTimeoutError,
+)
+from agentguard.server.sandbox.models import SandboxRunRequest, SandboxRunResult
 
 router = APIRouter(prefix="/debug/sandbox", tags=["sandbox-debug"])
 

@@ -11,7 +11,7 @@ from docker.errors import (  # type: ignore[import-not-found]
 from requests.exceptions import ReadTimeout
 
 import docker
-from agentguard.sandbox.models import SandboxRunResult
+from agentguard.server.sandbox.models import SandboxRunResult
 
 logger = logging.getLogger(__name__)
 

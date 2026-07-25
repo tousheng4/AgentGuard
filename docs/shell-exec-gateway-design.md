@@ -122,7 +122,7 @@ MVP 策略先保持保守和确定：
 
 协调策略判断和沙箱执行。
 
-`agentguard.api.tools`
+`agentguard.server.api.tools`
 
 暴露 `POST /tools/shell/exec`。
 

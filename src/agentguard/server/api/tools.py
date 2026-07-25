@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from agentguard.gateway.models import ShellExecAction, ShellExecResponse
 from agentguard.gateway.shell import ShellGateway
-from agentguard.sandbox.executor import SandboxExecutionError, SandboxTimeoutError
+from agentguard.server.sandbox.executor import SandboxExecutionError, SandboxTimeoutError
 
 
 class ShellGatewayProtocol(Protocol):

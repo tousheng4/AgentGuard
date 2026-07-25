@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from agentguard.policy.models import PolicyDecision
-from agentguard.sandbox.models import SandboxRunResult
+from agentguard.server.sandbox.models import SandboxRunResult
 
 
 class ShellExecAction(BaseModel):

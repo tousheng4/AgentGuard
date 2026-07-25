@@ -1,7 +1,7 @@
 from agentguard.gateway.models import ShellExecAction, ShellExecResponse
 from agentguard.policy.models import PolicyEffect
 from agentguard.policy.shell import ShellPolicy
-from agentguard.sandbox.executor import SandboxExecutor
+from agentguard.server.sandbox.executor import SandboxExecutor
 
 
 class ShellGateway:

@@ -1,10 +1,10 @@
 from fastapi.testclient import TestClient
 
-from agentguard.api.tools import get_shell_gateway
 from agentguard.gateway.models import ShellExecResponse
-from agentguard.main import app
 from agentguard.policy.models import PolicyDecision, PolicyEffect
-from agentguard.sandbox.models import SandboxRunResult
+from agentguard.server.api.tools import get_shell_gateway
+from agentguard.server.app import app
+from agentguard.server.sandbox.models import SandboxRunResult
 
 
 class RecordingGateway:
