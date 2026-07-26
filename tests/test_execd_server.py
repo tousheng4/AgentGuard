@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from collections.abc import Iterator
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -116,3 +117,81 @@ def test_file_routes_reject_symlink_escape(
 
     assert response.status_code == 403
     assert not (outside / "file.txt").exists()
+
+
+def test_command_streams_stdout_before_completion(execd_url: str, tmp_path: Path) -> None:
+    started_at = time.monotonic()
+    events: list[tuple[float, dict[str, object]]] = []
+
+    with httpx.Client(base_url=execd_url, timeout=5) as client:
+        with client.stream(
+            "POST",
+            "/command",
+            json={
+                "command": "printf 'first\\n'; sleep 0.5; printf 'second\\n'",
+                "cwd": str(tmp_path),
+                "timeout_seconds": 3,
+            },
+        ) as response:
+            assert response.status_code == 200
+            assert response.headers["content-type"] == "text/event-stream"
+            for line in response.iter_lines():
+                if not line.startswith("data:"):
+                    continue
+                event = json.loads(line[5:].strip())
+                events.append((time.monotonic() - started_at, event))
+
+    event_types = [event["type"] for _, event in events]
+    assert event_types == ["init", "stdout", "stdout", "execution_complete"]
+    assert events[1][1]["text"] == "first\n"
+    assert events[1][0] < 0.4
+    assert events[2][1]["text"] == "second\n"
+
+
+def test_command_streams_stderr_and_nonzero_exit(execd_url: str, tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+
+    with httpx.Client(base_url=execd_url, timeout=5) as client:
+        with client.stream(
+            "POST",
+            "/command",
+            json={
+                "command": "printf problem >&2; exit 7",
+                "cwd": str(tmp_path),
+                "timeout_seconds": 3,
+            },
+        ) as response:
+            for line in response.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[5:].strip()))
+
+    assert [event["type"] for event in events] == ["init", "stderr", "error"]
+    assert events[1]["text"] == "problem"
+    error = events[2]["error"]
+    assert isinstance(error, dict)
+    assert error["evalue"] == "7"
+
+
+def test_command_timeout_emits_error_event(execd_url: str, tmp_path: Path) -> None:
+    events: list[dict[str, object]] = []
+    started_at = time.monotonic()
+
+    with httpx.Client(base_url=execd_url, timeout=5) as client:
+        with client.stream(
+            "POST",
+            "/command",
+            json={
+                "command": "sleep 10",
+                "cwd": str(tmp_path),
+                "timeout_seconds": 1,
+            },
+        ) as response:
+            for line in response.iter_lines():
+                if line.startswith("data:"):
+                    events.append(json.loads(line[5:].strip()))
+
+    assert time.monotonic() - started_at < 3
+    assert [event["type"] for event in events] == ["init", "error"]
+    error = events[1]["error"]
+    assert isinstance(error, dict)
+    assert error["ename"] == "CommandTimeoutError"

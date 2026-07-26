@@ -59,7 +59,11 @@ http://127.0.0.1:8000
 ```python
 import asyncio
 
-from agentguard.sdk.client import AgentGuardClient
+from agentguard.sdk import AgentGuardClient, ExecutionHandlers, OutputMessage
+
+
+async def print_stdout(message: OutputMessage) -> None:
+    print(message.text, end="")
 
 
 async def main() -> None:
@@ -70,8 +74,11 @@ async def main() -> None:
             "/workspace/main.py",
             "print(1 + 1)",
         )
-        result = await sandbox.commands.run("python /workspace/main.py")
-        print(result.stdout)
+        execution = await sandbox.commands.run(
+            "python -u /workspace/main.py",
+            handlers=ExecutionHandlers(on_stdout=print_stdout),
+        )
+        print(f"exit code: {execution.exit_code}")
     finally:
         await sandbox.kill()
 
@@ -85,8 +92,8 @@ asyncio.run(main())
 1. 请求 AgentGuard Server 创建一个 Docker 沙箱
 2. 解析这个沙箱里的 execd 地址
 3. 通过 execd 写入 `/workspace/main.py`
-4. 在沙箱中执行 Python 文件
-5. 输出 `2`
+4. 在沙箱中执行 Python 文件，并通过 SSE 实时接收 stdout/stderr
+5. 输出 `2`，SDK 同时将事件累计到 `execution.logs`
 6. 最后删除沙箱
 ```
 
@@ -110,8 +117,28 @@ curl http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/endpoints/44772
 
 ```bash
 curl -X POST http://<execd-endpoint>/command \
+  -H 'Accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{"command":"echo hi"}'
+```
+
+`POST /command` 只返回 SSE，不再返回单个 JSON 结果。事件包括：
+
+- `init`：命令 execution ID。
+- `stdout`：标准输出。
+- `stderr`：标准错误。
+- `error`：启动失败、非零退出或超时。
+- `execution_complete`：命令成功完成。
+- `ping`：长时间无输出时保持连接。
+
+不需要实时回调时可以省略 `handlers`，SDK 仍会消费 SSE 并累计输出：
+
+```python
+execution = await sandbox.commands.run("echo hello")
+
+print(execution.text)
+print(execution.logs.stderr)
+print(execution.exit_code)
 ```
 
 写入和读取文本文件：
@@ -163,12 +190,13 @@ curl -X DELETE http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>
 - 支持通过 `POST /command` 执行 shell 命令。
 - 支持文件写入、读取、上传、下载和目录列表。
 - 支持 async Python SDK 的 `sandbox.commands` 和 `sandbox.files`。
+- 支持基于 SSE 的实时 stdout/stderr 命令执行。
 
 暂时还没有实现：
 
 - 任意基础镜像的 execd 自动注入。
 - 大文件分块上传和 HTTP Range 下载。
-- 流式输出。
+- 后台命令、显式 interrupt 和命令状态查询。
 - ingress。
 - egress。
 - Kubernetes。

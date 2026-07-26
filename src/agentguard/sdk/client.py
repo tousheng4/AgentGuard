@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
 from agentguard.constants import DEFAULT_EXECD_PORT
+from agentguard.sdk.execution import (
+    Execution,
+    ExecutionComplete,
+    ExecutionError,
+    ExecutionHandlers,
+    OutputMessage,
+)
 from agentguard.sdk.files import FilesClient
-from agentguard.server.sandbox.models import SandboxInfo, SandboxRunResult
+from agentguard.server.sandbox.models import SandboxInfo
 
 
 @dataclass
@@ -22,22 +31,109 @@ class CommandsClient:
         *,
         cwd: str = "/workspace",
         timeout_seconds: int = 30,
-    ) -> SandboxRunResult:
+        handlers: ExecutionHandlers | None = None,
+    ) -> Execution:
+        execution = Execution()
         async with httpx.AsyncClient(
-            timeout=self.timeout_seconds,
+            timeout=httpx.Timeout(
+                connect=self.timeout_seconds,
+                read=None,
+                write=self.timeout_seconds,
+                pool=self.timeout_seconds,
+            ),
             transport=self.transport,
             trust_env=False,
         ) as client:
-            response = await client.post(
+            async with client.stream(
+                "POST",
                 f"http://{self.endpoint}/command",
                 json={
                     "command": command,
                     "cwd": cwd,
                     "timeout_seconds": timeout_seconds,
                 },
+                headers={
+                    "Accept": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                },
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    event = self._decode_sse_line(line)
+                    if event is not None:
+                        await self._dispatch_event(execution, event, handlers)
+
+        if execution.complete is None and execution.error is None:
+            raise RuntimeError("execd command stream ended without a terminal event")
+        return execution
+
+    @staticmethod
+    def _decode_sse_line(line: str) -> dict[str, Any] | None:
+        if not line.strip() or line.startswith((":", "event:", "id:", "retry:")):
+            return None
+        data = line[5:].strip() if line.startswith("data:") else line
+        decoded = json.loads(data)
+        if not isinstance(decoded, dict):
+            raise ValueError("SSE event must be a JSON object")
+        return decoded
+
+    @staticmethod
+    async def _dispatch_event(
+        execution: Execution,
+        event: dict[str, Any],
+        handlers: ExecutionHandlers | None,
+    ) -> None:
+        event_type = event.get("type")
+        timestamp = int(event.get("timestamp", 0))
+
+        if event_type == "init":
+            execution.id = str(event.get("text", ""))
+            if handlers and handlers.on_init:
+                await handlers.on_init(execution.id)
+        elif event_type in {"stdout", "stderr"}:
+            message = OutputMessage(
+                text=str(event.get("text", "")),
+                timestamp=timestamp,
+                is_error=event_type == "stderr",
             )
-            response.raise_for_status()
-            return SandboxRunResult.model_validate(response.json())
+            if not (handlers and handlers.skip_accumulation):
+                target = (
+                    execution.logs.stderr
+                    if event_type == "stderr"
+                    else execution.logs.stdout
+                )
+                target.append(message)
+            handler = (
+                handlers.on_stderr
+                if handlers and event_type == "stderr"
+                else handlers.on_stdout if handlers else None
+            )
+            if handler:
+                await handler(message)
+        elif event_type == "error":
+            error_data = event.get("error") or {}
+            error = ExecutionError(
+                name=str(error_data.get("ename", "")),
+                value=str(error_data.get("evalue", "")),
+                traceback=list(error_data.get("traceback") or []),
+                timestamp=timestamp,
+            )
+            execution.error = error
+            try:
+                execution.exit_code = int(error.value)
+            except ValueError:
+                execution.exit_code = None
+            if handlers and handlers.on_error:
+                await handlers.on_error(error)
+        elif event_type == "execution_complete":
+            complete = ExecutionComplete(
+                timestamp=timestamp,
+                execution_time_in_millis=int(event.get("execution_time", 0)),
+            )
+            execution.complete = complete
+            execution.exit_code = 0
+            if handlers and handlers.on_execution_complete:
+                await handlers.on_execution_complete(complete)
 
 
 @dataclass

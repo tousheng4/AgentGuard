@@ -4,6 +4,7 @@ import httpx
 import pytest
 
 from agentguard.sdk.client import AgentGuardClient
+from agentguard.sdk.execution import ExecutionHandlers, OutputMessage
 
 
 @pytest.mark.asyncio
@@ -60,7 +61,16 @@ async def test_client_create_run_kill_flow() -> None:
         if request.method == "POST" and str(request.url) == "http://execd.local:44772/command":
             body = json.loads(request.content)
             assert body["command"] == "echo hi"
-            return httpx.Response(200, json={"exit_code": 0, "stdout": "hi\n", "stderr": ""})
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=(
+                    'data: {"type":"init","text":"execution-1","timestamp":1}\n\n'
+                    'data: {"type":"stdout","text":"hi\\n","timestamp":2}\n\n'
+                    'data: {"type":"execution_complete","execution_time":3,'
+                    '"timestamp":4}\n\n'
+                ),
+            )
         if (
             request.method == "POST"
             and request.url.path == "/files/write"
@@ -98,9 +108,78 @@ async def test_client_create_run_kill_flow() -> None:
 
     assert sandbox.id == "sandbox-1"
     assert result.exit_code == 0
-    assert result.stdout == "hi\n"
+    assert result.text == "hi\n"
+    assert result.id == "execution-1"
     assert content == "print(1 + 1)"
     assert deleted == ["sandbox-1"]
+
+
+@pytest.mark.asyncio
+async def test_commands_client_dispatches_streaming_handlers() -> None:
+    messages: list[tuple[str, str]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=(
+                'data: {"type":"init","text":"execution-1","timestamp":1}\n\n'
+                'data: {"type":"stdout","text":"out\\n","timestamp":2}\n\n'
+                'data: {"type":"stderr","text":"err\\n","timestamp":3}\n\n'
+                'data: {"type":"execution_complete","execution_time":4,'
+                '"timestamp":5}\n\n'
+            ),
+        )
+
+    async def on_stdout(message: OutputMessage) -> None:
+        messages.append(("stdout", message.text))
+
+    async def on_stderr(message: OutputMessage) -> None:
+        messages.append(("stderr", message.text))
+
+    from agentguard.sdk.client import CommandsClient
+
+    commands = CommandsClient(
+        endpoint="execd.local:44772",
+        transport=httpx.MockTransport(handler),
+    )
+    execution = await commands.run(
+        "command",
+        handlers=ExecutionHandlers(
+            on_stdout=on_stdout,
+            on_stderr=on_stderr,
+        ),
+    )
+
+    assert messages == [("stdout", "out\n"), ("stderr", "err\n")]
+    assert execution.text == "out\n"
+    assert execution.logs.stderr[0].text == "err\n"
+    assert execution.complete is not None
+
+
+@pytest.mark.asyncio
+async def test_commands_client_maps_nonzero_exit_event() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            content=(
+                'data: {"type":"init","text":"execution-1","timestamp":1}\n\n'
+                'data: {"type":"error","error":{"ename":"CommandExecError",'
+                '"evalue":"7","traceback":[]},"timestamp":2}\n\n'
+            ),
+        )
+
+    from agentguard.sdk.client import CommandsClient
+
+    execution = await CommandsClient(
+        endpoint="execd.local:44772",
+        transport=httpx.MockTransport(handler),
+    ).run("exit 7")
+
+    assert execution.exit_code == 7
+    assert execution.error is not None
+    assert execution.error.name == "CommandExecError"
 
 
 @pytest.mark.asyncio

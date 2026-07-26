@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import subprocess
 from email.parser import BytesParser
 from email.policy import default
 from http import HTTPStatus
@@ -9,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from agentguard.execd.command import StreamingCommand
 from agentguard.execd.filesystem import (
     FilesystemError,
     FilesystemService,
@@ -61,33 +61,32 @@ class ExecdHandler(BaseHTTPRequestHandler):
             command = self._required_string(payload, "command")
             cwd = self._optional_string(payload, "cwd", "/workspace")
             timeout_seconds = self._optional_int(payload, "timeout_seconds", 30)
-            completed = subprocess.run(
-                ["sh", "-c", command],
+            streaming_command = StreamingCommand(
+                command,
                 cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-                check=False,
+                timeout_seconds=timeout_seconds,
             )
-            self._write_json(
-                HTTPStatus.OK,
-                {
-                    "exit_code": completed.returncode,
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                },
-            )
-        except subprocess.TimeoutExpired as exc:
-            self._write_json(
-                HTTPStatus.REQUEST_TIMEOUT,
-                {
-                    "error": f"Command timed out after {exc.timeout} seconds",
-                    "stdout": exc.stdout or "",
-                    "stderr": exc.stderr or "",
-                },
-            )
+            self._write_sse_headers()
+            try:
+                for event in streaming_command.events():
+                    self._write_sse_event(event)
+            except (BrokenPipeError, ConnectionResetError):
+                streaming_command.terminate()
         except Exception as exc:
             self._write_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+
+    def _write_sse_headers(self) -> None:
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.wfile.flush()
+
+    def _write_sse_event(self, event: dict[str, Any]) -> None:
+        data = json.dumps(event, separators=(",", ":")).encode("utf-8")
+        self.wfile.write(b"data: " + data + b"\n\n")
+        self.wfile.flush()
 
     def _handle_write_file(self) -> None:
         try:
