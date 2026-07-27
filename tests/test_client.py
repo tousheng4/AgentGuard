@@ -7,6 +7,21 @@ from agentguard.sdk.client import AgentGuardClient
 from agentguard.sdk.execution import ExecutionHandlers, OutputMessage
 
 
+def sandbox_payload() -> dict[str, object]:
+    return {
+        "id": "sandbox-1",
+        "image": "agentguard-sandbox:latest",
+        "state": "running",
+        "status": {"state": "running"},
+        "metadata": {},
+        "created_at": "2026-07-27T00:00:00Z",
+        "expires_at": "2026-07-27T01:00:00Z",
+        "entrypoint": ["tail", "-f", "/dev/null"],
+        "resource_limits": {"cpu": 1.0, "memory_mb": 512, "pids": 128},
+        "exposed_ports": [44772],
+    }
+
+
 @pytest.mark.asyncio
 async def test_client_waits_for_execd_readiness() -> None:
     ping_attempts = 0
@@ -14,10 +29,9 @@ async def test_client_waits_for_execd_readiness() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         nonlocal ping_attempts
         if request.method == "POST" and request.url.path == "/v1/sandboxes":
-            return httpx.Response(
-                201,
-                json={"id": "sandbox-1", "image": "image", "state": "running"},
-            )
+            payload = sandbox_payload()
+            payload["image"] = "image"
+            return httpx.Response(201, json=payload)
         if request.url.path == "/v1/sandboxes/sandbox-1/endpoints/44772":
             return httpx.Response(200, json={"endpoint": "execd.local:44772"})
         if request.url.path == "/ping":
@@ -43,14 +57,7 @@ async def test_client_create_run_kill_flow() -> None:
 
     async def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST" and request.url.path == "/v1/sandboxes":
-            return httpx.Response(
-                201,
-                json={
-                    "id": "sandbox-1",
-                    "image": "agentguard-sandbox:latest",
-                    "state": "running",
-                },
-            )
+            return httpx.Response(201, json=sandbox_payload())
         if (
             request.method == "GET"
             and request.url.path == "/v1/sandboxes/sandbox-1/endpoints/44772"
@@ -180,6 +187,60 @@ async def test_commands_client_maps_nonzero_exit_event() -> None:
     assert execution.exit_code == 7
     assert execution.error is not None
     assert execution.error.name == "CommandExecError"
+
+
+@pytest.mark.asyncio
+async def test_client_lifecycle_management_methods() -> None:
+    actions: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET" and request.url.path == "/v1/sandboxes":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [sandbox_payload()],
+                    "page": 1,
+                    "page_size": 20,
+                    "total_items": 1,
+                    "total_pages": 1,
+                },
+            )
+        if (
+            request.method == "GET"
+            and request.url.path == "/v1/sandboxes/sandbox-1"
+        ):
+            return httpx.Response(200, json=sandbox_payload())
+        if request.url.path.endswith("/pause") or request.url.path.endswith("/resume"):
+            actions.append(request.url.path.rsplit("/", 1)[-1])
+            return httpx.Response(202)
+        if request.url.path.endswith("/renew-expiration"):
+            return httpx.Response(
+                200,
+                json={"expires_at": "2026-07-27T02:00:00Z"},
+            )
+        if request.url.path.endswith("/endpoints/8080"):
+            return httpx.Response(200, json={"endpoint": "127.0.0.1:12345"})
+        return httpx.Response(404)
+
+    client = AgentGuardClient(
+        "http://agentguard.local",
+        transport=httpx.MockTransport(handler),
+    )
+    listed = await client.list_sandboxes(states=["running"])
+    info = await client.get_sandbox("sandbox-1")
+    await client.pause_sandbox("sandbox-1")
+    await client.resume_sandbox("sandbox-1")
+    renewed = await client.renew_sandbox_expiration(
+        "sandbox-1",
+        timeout_seconds=3600,
+    )
+    endpoint = await client.get_sandbox_endpoint("sandbox-1", 8080)
+
+    assert listed.total_items == 1
+    assert info.state.value == "running"
+    assert actions == ["pause", "resume"]
+    assert renewed.expires_at.hour == 2
+    assert endpoint.endpoint == "127.0.0.1:12345"
 
 
 @pytest.mark.asyncio

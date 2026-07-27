@@ -2,7 +2,7 @@
 
 AgentGuard 是一个用于学习和迭代 AI Agent 安全执行能力的小型沙箱控制面。
 
-当前已完成阶段 2：在最小执行闭环上补齐文件读写、上传下载和目录列表。
+当前已完成 Docker 生命周期、文件能力和 SSE 命令执行主链。
 
 ```text
 创建沙箱 -> 写入代码 -> 执行代码 -> 读取结果 -> 删除沙箱
@@ -12,7 +12,8 @@ AgentGuard 是一个用于学习和迭代 AI Agent 安全执行能力的小型�
 
 - `agentguard.server.app`：FastAPI 服务入口。
 - `agentguard.server.api.lifecycle`：沙箱生命周期 API，负责创建、查询、删除沙箱，以及解析沙箱内服务地址。
-- `agentguard.server.sandbox.docker`：基于 Docker 的沙箱生命周期实现。
+- `agentguard.server.sandbox.docker`：Docker 生命周期、状态、端口和过期回收。
+- `agentguard.server.sandbox.runtime`：在目标 Python 镜像启动前注入 execd 和 bootstrap。
 - `agentguard.execd.server`：运行在沙箱容器里的小型 HTTP 服务，负责执行命令和文件操作。
 - `agentguard.sdk.client`：async Python 客户端，提供 `commands` 和 `files` 服务。
 
@@ -68,7 +69,11 @@ async def print_stdout(message: OutputMessage) -> None:
 
 async def main() -> None:
     client = AgentGuardClient("http://127.0.0.1:8000")
-    sandbox = await client.create_sandbox()
+    sandbox = await client.create_sandbox(
+        "python:3.12-slim",
+        timeout_seconds=1800,
+        metadata={"task": "example"},
+    )
     try:
         await sandbox.files.write_file(
             "/workspace/main.py",
@@ -104,13 +109,38 @@ asyncio.run(main())
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/sandboxes \
   -H 'Content-Type: application/json' \
-  -d '{}'
+  -d '{
+    "image":"python:3.12-slim",
+    "entrypoint":["tail","-f","/dev/null"],
+    "timeout_seconds":1800,
+    "metadata":{"task":"example"},
+    "exposed_ports":[8080]
+  }'
 ```
 
-解析 execd 地址：
+Server 会先创建但不启动目标容器，注入 `/opt/agentguard` 和 bootstrap，
+再同时启动用户 entrypoint 与 execd。当前 runtime 注入要求目标镜像包含
+`/bin/sh`，以及 Python 3.11+（命令名为 `python3` 或 `python`）。
+
+列出、暂停、恢复和续期：
+
+```bash
+curl http://127.0.0.1:8000/v1/sandboxes
+
+curl -X POST http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/pause
+curl -X POST http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/resume
+
+curl -X POST \
+  http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/renew-expiration \
+  -H 'Content-Type: application/json' \
+  -d '{"timeout_seconds":3600}'
+```
+
+解析 execd 或用户服务地址：
 
 ```bash
 curl http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/endpoints/44772
+curl http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/endpoints/8080
 ```
 
 直接请求 execd 执行命令：
@@ -185,16 +215,21 @@ curl -X DELETE http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>
 ## 当前阶段的边界
 
 - 支持 Docker runtime。
-- 支持创建和删除持久沙箱容器。
-- 支持解析沙箱内 `execd` 的 `44772` 端口。
+- 支持在 Python 基础镜像中自动注入 execd runtime。
+- 支持创建、查询、列表、删除、暂停和恢复容器。
+- 支持 metadata 过滤和分页。
+- 支持自动过期、续期和 Server 重启后的计时器恢复。
+- 支持 execd 和声明过的用户服务端口。
+- 支持 CPU、内存和 PID 资源上限。
 - 支持通过 `POST /command` 执行 shell 命令。
 - 支持文件写入、读取、上传、下载和目录列表。
 - 支持 async Python SDK 的 `sandbox.commands` 和 `sandbox.files`。
 - 支持基于 SSE 的实时 stdout/stderr 命令执行。
 
-暂时还没有实现：
+当前限制和暂未实现：
 
-- 任意基础镜像的 execd 自动注入。
+- runtime 注入目前只支持带 `/bin/sh` 和 Python 3.11+ 的 Linux 镜像；尚不是
+  OpenSandbox 那种可注入任意 glibc 镜像的独立 Go 二进制。
 - 大文件分块上传和 HTTP Range 下载。
 - 后台命令、显式 interrupt 和命令状态查询。
 - ingress。

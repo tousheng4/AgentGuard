@@ -8,6 +8,13 @@ from agentguard.sdk.execution import (
     OutputMessage,
 )
 from agentguard.sdk.files import DirectoryEntry, FilesClient, FileType
+from agentguard.server.sandbox.models import (
+    SandboxEndpoint,
+    SandboxInfo,
+    SandboxListResponse,
+    SandboxResourceLimits,
+    SandboxState,
+)
 
 __all__ = [
     "AgentGuardClient",
@@ -22,4 +29,9 @@ __all__ = [
     "FileType",
     "OutputMessage",
     "Sandbox",
+    "SandboxEndpoint",
+    "SandboxInfo",
+    "SandboxListResponse",
+    "SandboxResourceLimits",
+    "SandboxState",
 ]
