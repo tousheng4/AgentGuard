@@ -35,3 +35,17 @@ def create_sandbox_runtime(settings: AppSettings) -> SandboxRuntime:
 
 def list_available_runtimes() -> list[str]:
     return sorted(_RUNTIME_REGISTRY)
+
+
+def register_runtime(
+    name: str,
+    builder: RuntimeBuilder,
+    *,
+    replace: bool = False,
+) -> None:
+    normalized_name = name.strip().lower()
+    if not normalized_name:
+        raise ValueError("Runtime name must not be empty")
+    if normalized_name in _RUNTIME_REGISTRY and not replace:
+        raise ValueError(f"Sandbox runtime '{normalized_name}' is already registered")
+    _RUNTIME_REGISTRY[normalized_name] = builder

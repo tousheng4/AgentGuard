@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import threading
 import time
 from datetime import UTC, datetime, timedelta
 from http.client import HTTPConnection
@@ -21,6 +20,8 @@ from agentguard.server.sandbox.errors import (
     SandboxRuntimeError,
     SandboxStateConflictError,
 )
+from agentguard.server.sandbox.executor import SandboxExecutor
+from agentguard.server.sandbox.expiration import ExpirationManager
 from agentguard.server.sandbox.injector import BOOTSTRAP_PATH, DockerRuntimeInjector
 from agentguard.server.sandbox.models import (
     CreateSandboxRequest,
@@ -28,6 +29,7 @@ from agentguard.server.sandbox.models import (
     SandboxEndpoint,
     SandboxInfo,
     SandboxListResponse,
+    SandboxRunResult,
     SandboxState,
     SandboxStatus,
 )
@@ -64,14 +66,17 @@ class DockerSandboxRuntime:
         )
         self._client: Any = docker_client or docker.from_env()  # type: ignore[attr-defined]
         self._runtime = DockerRuntimeInjector()
+        self._command_runner = SandboxExecutor(
+            image=self._default_image,
+            docker_client=self._client,
+        )
         self._execd_ready_timeout_seconds = execd_ready_timeout_seconds
         self._bind_host = bind_host
-        self._expiration_lock = threading.RLock()
-        self._expiration_timers: dict[str, threading.Timer] = {}
-        self._expirations: dict[str, datetime] = {}
         root = Path(data_dir or os.environ.get("AGENTGUARD_DATA_DIR", "data"))
-        self._expiration_store = root / "sandbox-expirations.json"
-        self._load_expiration_store()
+        self._expiration_manager = ExpirationManager(
+            root / "sandbox-expirations.json",
+            self._expire_sandbox,
+        )
         self.restore_expirations()
 
     @property
@@ -88,11 +93,20 @@ class DockerSandboxRuntime:
         )
 
     def close(self) -> None:
-        with self._expiration_lock:
-            timers = list(self._expiration_timers.values())
-            self._expiration_timers.clear()
-        for timer in timers:
-            timer.cancel()
+        self._expiration_manager.close()
+
+    def run(
+        self,
+        argv: list[str],
+        timeout_seconds: int,
+        *,
+        cwd: str = "/workspace",
+    ) -> SandboxRunResult:
+        return self._command_runner.run(
+            argv,
+            timeout_seconds,
+            cwd=cwd,
+        )
 
     def create(self, request: CreateSandboxRequest) -> SandboxInfo:
         sandbox_id = str(uuid4())
@@ -154,7 +168,7 @@ class DockerSandboxRuntime:
             raise SandboxLifecycleError(f"Failed to create sandbox: {exc}") from exc
 
         if expires_at is not None:
-            self._schedule_expiration(sandbox_id, expires_at)
+            self._expiration_manager.schedule(sandbox_id, expires_at)
         return self._container_to_sandbox(container, sandbox_id)
 
     def list_sandboxes(
@@ -219,7 +233,7 @@ class DockerSandboxRuntime:
         except DockerException as exc:
             raise SandboxLifecycleError(f"Failed to delete sandbox: {exc}") from exc
         finally:
-            self._remove_expiration(sandbox_id)
+            self._expiration_manager.remove(sandbox_id)
 
     def pause(self, sandbox_id: str) -> None:
         container = self._get_container(sandbox_id)
@@ -252,7 +266,7 @@ class DockerSandboxRuntime:
     ) -> RenewSandboxExpirationResponse:
         self._get_container(sandbox_id)
         expires_at = datetime.now(UTC) + timedelta(seconds=timeout_seconds)
-        self._schedule_expiration(sandbox_id, expires_at)
+        self._expiration_manager.schedule(sandbox_id, expires_at)
         return RenewSandboxExpirationResponse(expires_at=expires_at)
 
     def endpoint(self, sandbox_id: str, port: int) -> SandboxEndpoint:
@@ -297,19 +311,20 @@ class DockerSandboxRuntime:
             if not sandbox_id:
                 continue
             managed_ids.add(sandbox_id)
-            expires_at = self._expirations.get(sandbox_id)
+            expires_at = self._expiration_manager.get(sandbox_id)
             if expires_at is None:
                 expires_at = self._parse_datetime(labels.get(EXPIRES_AT_LABEL))
             if expires_at is None:
                 continue
             if expires_at <= now:
-                self._expire(sandbox_id)
+                self._expire_sandbox(sandbox_id)
+                self._expiration_manager.remove(sandbox_id)
             else:
-                self._schedule_expiration(sandbox_id, expires_at)
+                self._expiration_manager.schedule(sandbox_id, expires_at)
 
-        stale_ids = set(self._expirations) - managed_ids
+        stale_ids = self._expiration_manager.ids() - managed_ids
         for sandbox_id in stale_ids:
-            self._remove_expiration(sandbox_id)
+            self._expiration_manager.remove(sandbox_id)
 
     def _ensure_image(self, image: str) -> None:
         try:
@@ -382,7 +397,7 @@ class DockerSandboxRuntime:
         created_at = self._parse_datetime(labels.get(CREATED_AT_LABEL))
         if created_at is None:
             created_at = self._parse_datetime(attrs.get("Created")) or datetime.now(UTC)
-        expires_at = self._expirations.get(sandbox_id)
+        expires_at = self._expiration_manager.get(sandbox_id)
         if expires_at is None:
             expires_at = self._parse_datetime(labels.get(EXPIRES_AT_LABEL))
         reason = None
@@ -436,62 +451,12 @@ class DockerSandboxRuntime:
             return SandboxState.PENDING
         return SandboxState.STOPPED
 
-    def _schedule_expiration(self, sandbox_id: str, expires_at: datetime) -> None:
-        delay = max(0.0, (expires_at - datetime.now(UTC)).total_seconds())
-        timer = threading.Timer(delay, self._expire, args=(sandbox_id,))
-        timer.daemon = True
-        with self._expiration_lock:
-            previous = self._expiration_timers.pop(sandbox_id, None)
-            if previous:
-                previous.cancel()
-            self._expirations[sandbox_id] = expires_at
-            self._expiration_timers[sandbox_id] = timer
-            self._save_expiration_store()
-        timer.start()
-
-    def _expire(self, sandbox_id: str) -> None:
-        with self._expiration_lock:
-            expires_at = self._expirations.get(sandbox_id)
-        if expires_at is not None and expires_at > datetime.now(UTC):
-            self._schedule_expiration(sandbox_id, expires_at)
-            return
+    def _expire_sandbox(self, sandbox_id: str) -> None:
         try:
             container = self._get_container(sandbox_id)
             container.remove(force=True)
         except (SandboxNotFoundError, DockerException):
             pass
-        finally:
-            self._remove_expiration(sandbox_id)
-
-    def _remove_expiration(self, sandbox_id: str) -> None:
-        with self._expiration_lock:
-            timer = self._expiration_timers.pop(sandbox_id, None)
-            if timer:
-                timer.cancel()
-            self._expirations.pop(sandbox_id, None)
-            self._save_expiration_store()
-
-    def _load_expiration_store(self) -> None:
-        try:
-            payload = json.loads(self._expiration_store.read_text())
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return
-        if not isinstance(payload, dict):
-            return
-        for sandbox_id, raw_value in payload.items():
-            parsed = self._parse_datetime(raw_value)
-            if parsed is not None:
-                self._expirations[str(sandbox_id)] = parsed
-
-    def _save_expiration_store(self) -> None:
-        self._expiration_store.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._expiration_store.with_suffix(".tmp")
-        payload = {
-            sandbox_id: expires_at.isoformat()
-            for sandbox_id, expires_at in self._expirations.items()
-        }
-        temporary.write_text(json.dumps(payload, sort_keys=True))
-        temporary.replace(self._expiration_store)
 
     @staticmethod
     def _cleanup_failed_container(container: Any | None) -> None:

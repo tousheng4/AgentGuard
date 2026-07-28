@@ -74,6 +74,22 @@ def test_real_docker_create_write_execute_and_delete() -> None:
                 "execution_complete",
             ]
             assert events[1]["text"] == "agentguard-docker-e2e\n"
+
+            tool_response = client.post(
+                "/tools/shell/exec",
+                json={
+                    "argv": ["echo", "runtime-one-shot"],
+                    "cwd": "/workspace",
+                    "timeout_seconds": 10,
+                },
+            )
+            assert tool_response.status_code == 200, tool_response.text
+            assert tool_response.json()["status"] == "executed"
+            assert tool_response.json()["result"] == {
+                "exit_code": 0,
+                "stdout": "runtime-one-shot\n",
+                "stderr": "",
+            }
         except Exception as exc:
             container = runtime._get_container(sandbox_id)  # type: ignore[attr-defined]
             container.reload()

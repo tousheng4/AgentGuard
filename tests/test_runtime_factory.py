@@ -13,6 +13,7 @@ from agentguard.server.sandbox.docker import DockerSandboxRuntime
 from agentguard.server.sandbox.factory import (
     create_sandbox_runtime,
     list_available_runtimes,
+    register_runtime,
 )
 from agentguard.server.sandbox.service import RuntimeCapabilities
 
@@ -61,3 +62,29 @@ def test_app_uses_injected_runtime_and_closes_it() -> None:
         assert not runtime.closed
 
     assert runtime.closed
+
+
+def test_factory_accepts_registered_runtime(monkeypatch: Any) -> None:
+    runtime = StubRuntime()
+    registry: dict[str, Any] = {"docker": lambda settings: runtime}
+    monkeypatch.setattr(
+        "agentguard.server.sandbox.factory._RUNTIME_REGISTRY",
+        registry,
+    )
+    register_runtime("stub", lambda settings: runtime)
+
+    selected = create_sandbox_runtime(
+        AppSettings(runtime=RuntimeSettings(type="stub"))
+    )
+
+    assert selected is runtime
+    assert list_available_runtimes() == ["docker", "stub"]
+
+
+def test_register_runtime_rejects_duplicate_name() -> None:
+    try:
+        register_runtime("docker", lambda settings: StubRuntime())  # type: ignore[arg-type]
+    except ValueError as exc:
+        assert str(exc) == "Sandbox runtime 'docker' is already registered"
+    else:
+        raise AssertionError("duplicate runtime registration should fail")

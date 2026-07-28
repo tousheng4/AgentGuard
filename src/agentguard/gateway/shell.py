@@ -2,13 +2,14 @@ from agentguard.gateway.models import ShellExecAction, ShellExecResponse
 from agentguard.policy.models import PolicyEffect
 from agentguard.policy.shell import ShellPolicy
 from agentguard.server.sandbox.executor import SandboxExecutor
+from agentguard.server.sandbox.service import SandboxCommandRunner
 
 
 class ShellGateway:
     def __init__(
         self,
         policy: ShellPolicy | None = None,
-        executor: SandboxExecutor | None = None,
+        executor: SandboxCommandRunner | None = None,
     ) -> None:
         self._policy = policy or ShellPolicy()
         self._executor = executor
@@ -26,10 +27,11 @@ class ShellGateway:
         result = self._get_executor().run(
             argv=action.argv,
             timeout_seconds=action.timeout_seconds,
+            cwd=action.cwd,
         )
         return ShellExecResponse(status="executed", decision=decision, result=result)
 
-    def _get_executor(self) -> SandboxExecutor:
+    def _get_executor(self) -> SandboxCommandRunner:
         if self._executor is None:
             self._executor = SandboxExecutor()
         return self._executor

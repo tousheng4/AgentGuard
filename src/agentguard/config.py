@@ -1,12 +1,11 @@
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class RuntimeSettings(BaseModel):
-    type: Literal["docker"] = "docker"
+    type: str = Field(default="docker", min_length=1)
 
 
 class DockerRuntimeSettings(BaseModel):

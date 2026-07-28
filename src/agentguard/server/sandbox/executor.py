@@ -25,17 +25,28 @@ class SandboxTimeoutError(SandboxExecutionError):
 
 
 class SandboxExecutor:
-    def __init__(self, image: str | None = None) -> None:
+    def __init__(
+        self,
+        image: str | None = None,
+        *,
+        docker_client: Any | None = None,
+    ) -> None:
         self._image = image or os.environ.get(
             "AGENTGUARD_SANDBOX_IMAGE",
             "agentguard-sandbox:latest",
         )
-        self._client: Any = docker.from_env()  # type: ignore[attr-defined]
+        self._client: Any = docker_client or docker.from_env()  # type: ignore[attr-defined]
 
     def ping(self) -> bool:
         return bool(self._client.ping())
 
-    def run(self, argv: list[str], timeout_seconds: int) -> SandboxRunResult:
+    def run(
+        self,
+        argv: list[str],
+        timeout_seconds: int,
+        *,
+        cwd: str = "/workspace",
+    ) -> SandboxRunResult:
         if not argv:
             raise ValueError("argv must not be empty")
 
@@ -45,7 +56,7 @@ class SandboxExecutor:
             container = self._client.containers.create(
                 image=self._image,
                 command=argv,
-                working_dir="/app/workspaces",
+                working_dir=cwd,
 
                 # 进程身份
                 user="10001:10001",

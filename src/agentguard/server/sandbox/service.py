@@ -9,6 +9,7 @@ from agentguard.server.sandbox.models import (
     SandboxEndpoint,
     SandboxInfo,
     SandboxListResponse,
+    SandboxRunResult,
     SandboxState,
 )
 
@@ -57,3 +58,14 @@ class SandboxRuntime(Protocol):
     def endpoint(self, sandbox_id: str, port: int) -> SandboxEndpoint: ...
 
     def close(self) -> None: ...
+
+
+@runtime_checkable
+class SandboxCommandRunner(Protocol):
+    def run(
+        self,
+        argv: list[str],
+        timeout_seconds: int,
+        *,
+        cwd: str = "/workspace",
+    ) -> SandboxRunResult: ...

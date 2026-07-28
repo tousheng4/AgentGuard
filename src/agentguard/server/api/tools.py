@@ -1,10 +1,11 @@
 from typing import Annotated, Protocol
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from agentguard.gateway.models import ShellExecAction, ShellExecResponse
 from agentguard.gateway.shell import ShellGateway
 from agentguard.server.sandbox.executor import SandboxExecutionError, SandboxTimeoutError
+from agentguard.server.sandbox.service import SandboxCommandRunner
 
 
 class ShellGatewayProtocol(Protocol):
@@ -15,8 +16,11 @@ class ShellGatewayProtocol(Protocol):
 router = APIRouter(prefix="/tools", tags=["tools"])
 
 
-def get_shell_gateway() -> ShellGatewayProtocol:
-    return ShellGateway()
+def get_shell_gateway(request: Request) -> ShellGatewayProtocol:
+    runtime = getattr(request.app.state, "sandbox_runtime", None)
+    if not isinstance(runtime, SandboxCommandRunner):
+        raise RuntimeError("Active sandbox runtime does not support command execution")
+    return ShellGateway(executor=runtime)
 
 
 @router.post("/shell/exec", response_model=ShellExecResponse)
