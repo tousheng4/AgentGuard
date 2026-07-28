@@ -11,9 +11,11 @@ AgentGuard 是一个用于学习和迭代 AI Agent 安全执行能力的小型�
 ## 组件
 
 - `agentguard.server.app`：FastAPI 服务入口。
-- `agentguard.server.api.lifecycle`：沙箱生命周期 API，负责创建、查询、删除沙箱，以及解析沙箱内服务地址。
-- `agentguard.server.sandbox.docker`：Docker 生命周期、状态、端口和过期回收。
-- `agentguard.server.sandbox.runtime`：在目标 Python 镜像启动前注入 execd 和 bootstrap。
+- `agentguard.server.api.lifecycle`：薄 HTTP 适配层，负责参数解析和领域错误映射。
+- `agentguard.server.sandbox.service`：与具体后端无关的 `SandboxRuntime` 契约。
+- `agentguard.server.sandbox.factory`：根据配置创建 Docker 等 runtime 后端。
+- `agentguard.server.sandbox.docker`：Docker runtime，负责生命周期、状态、端口和过期回收。
+- `agentguard.server.sandbox.injector`：在目标 Python 镜像启动前注入 execd payload 和 bootstrap。
 - `agentguard.execd.server`：运行在沙箱容器里的小型 HTTP 服务，负责执行命令和文件操作。
 - `agentguard.sdk.client`：async Python 客户端，提供 `commands` 和 `files` 服务。
 
@@ -36,6 +38,22 @@ src/agentguard/
 ```
 
 `agentguard.main` 仍然保留为兼容入口，实际 app 来自 `agentguard.server.app`。
+
+## Runtime 配置
+
+Server 启动时通过 runtime factory 创建后端，并由 FastAPI lifespan 管理其生命周期。
+当前支持的后端是 `docker`：
+
+```bash
+export AGENTGUARD_RUNTIME__TYPE=docker
+export AGENTGUARD_DOCKER__IMAGE=agentguard-sandbox:latest
+export AGENTGUARD_DOCKER__DATA_DIR=data
+export AGENTGUARD_DOCKER__EXECD_READY_TIMEOUT_SECONDS=5
+export AGENTGUARD_DOCKER__BIND_HOST=127.0.0.1
+```
+
+未配置时使用上述默认值。生命周期 API 和 Python SDK 不依赖具体后端；后续新增
+runtime 只需实现 `SandboxRuntime` 并接入 factory。
 
 ## 构建沙箱镜像
 
@@ -214,7 +232,7 @@ curl -X DELETE http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>
 
 ## 当前阶段的边界
 
-- 支持 Docker runtime。
+- 支持通过配置和 factory 选择 runtime，当前实现为 Docker。
 - 支持在 Python 基础镜像中自动注入 execd runtime。
 - 支持创建、查询、列表、删除、暂停和恢复容器。
 - 支持 metadata 过滤和分页。

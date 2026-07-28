@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import math
 import os
-import socket
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,6 +15,13 @@ from docker.errors import DockerException, ImageNotFound, NotFound  # type: igno
 
 import docker
 from agentguard.constants import DEFAULT_EXECD_PORT
+from agentguard.server.sandbox.errors import (
+    SandboxEndpointUnavailableError,
+    SandboxNotFoundError,
+    SandboxRuntimeError,
+    SandboxStateConflictError,
+)
+from agentguard.server.sandbox.injector import BOOTSTRAP_PATH, DockerRuntimeInjector
 from agentguard.server.sandbox.models import (
     CreateSandboxRequest,
     RenewSandboxExpirationResponse,
@@ -24,7 +31,7 @@ from agentguard.server.sandbox.models import (
     SandboxState,
     SandboxStatus,
 )
-from agentguard.server.sandbox.runtime import BOOTSTRAP_PATH, DockerRuntimeInjector
+from agentguard.server.sandbox.service import RuntimeCapabilities
 
 EXECD_PORT = DEFAULT_EXECD_PORT
 SANDBOX_ID_LABEL = "agentguard.sandbox.id"
@@ -38,29 +45,18 @@ RESOURCE_LIMITS_LABEL = "agentguard.sandbox.resource_limits"
 EXPOSED_PORTS_LABEL = "agentguard.sandbox.exposed_ports"
 
 
-class SandboxLifecycleError(RuntimeError):
-    pass
+SandboxLifecycleError = SandboxRuntimeError
 
 
-class SandboxNotFoundError(SandboxLifecycleError):
-    pass
-
-
-class SandboxStateConflictError(SandboxLifecycleError):
-    pass
-
-
-class SandboxEndpointUnavailableError(SandboxLifecycleError):
-    pass
-
-
-class DockerSandboxLifecycle:
+class DockerSandboxRuntime:
     def __init__(
         self,
         default_image: str | None = None,
         *,
         docker_client: Any | None = None,
         data_dir: str | Path | None = None,
+        execd_ready_timeout_seconds: float = 5.0,
+        bind_host: str = "127.0.0.1",
     ) -> None:
         self._default_image = default_image or os.environ.get(
             "AGENTGUARD_SANDBOX_IMAGE",
@@ -68,6 +64,8 @@ class DockerSandboxLifecycle:
         )
         self._client: Any = docker_client or docker.from_env()  # type: ignore[attr-defined]
         self._runtime = DockerRuntimeInjector()
+        self._execd_ready_timeout_seconds = execd_ready_timeout_seconds
+        self._bind_host = bind_host
         self._expiration_lock = threading.RLock()
         self._expiration_timers: dict[str, threading.Timer] = {}
         self._expirations: dict[str, datetime] = {}
@@ -75,6 +73,26 @@ class DockerSandboxLifecycle:
         self._expiration_store = root / "sandbox-expirations.json"
         self._load_expiration_store()
         self.restore_expirations()
+
+    @property
+    def name(self) -> str:
+        return "docker"
+
+    @property
+    def capabilities(self) -> RuntimeCapabilities:
+        return RuntimeCapabilities(
+            pause_resume=True,
+            direct_endpoints=True,
+            expiration=True,
+            runtime_injection=True,
+        )
+
+    def close(self) -> None:
+        with self._expiration_lock:
+            timers = list(self._expiration_timers.values())
+            self._expiration_timers.clear()
+        for timer in timers:
+            timer.cancel()
 
     def create(self, request: CreateSandboxRequest) -> SandboxInfo:
         sandbox_id = str(uuid4())
@@ -94,10 +112,7 @@ class DockerSandboxLifecycle:
             expires_at,
             ports,
         )
-        port_bindings = {
-            f"{port}/tcp": ("127.0.0.1", None)
-            for port in ports
-        }
+        port_bindings = {f"{port}/tcp": (self._bind_host, None) for port in ports}
         limits = request.resource_limits
         container = None
 
@@ -302,7 +317,12 @@ class DockerSandboxLifecycle:
         except ImageNotFound:
             self._client.images.pull(image)
 
-    def _wait_for_execd(self, container: Any, timeout_seconds: float = 5.0) -> None:
+    def _wait_for_execd(
+        self,
+        container: Any,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        timeout_seconds = timeout_seconds or self._execd_ready_timeout_seconds
         deadline = time.monotonic() + timeout_seconds
         while time.monotonic() < deadline:
             container.reload()
@@ -322,14 +342,21 @@ class DockerSandboxLifecycle:
                 host = binding.get("HostIp") or "127.0.0.1"
                 if host in {"0.0.0.0", "::"}:
                     host = "127.0.0.1"
+                connection = HTTPConnection(
+                    host,
+                    int(binding["HostPort"]),
+                    timeout=0.2,
+                )
                 try:
-                    with socket.create_connection(
-                        (host, int(binding["HostPort"])),
-                        timeout=0.2,
-                    ):
+                    connection.request("GET", "/ping")
+                    response = connection.getresponse()
+                    response.read()
+                    if response.status == 200:
                         return
-                except OSError:
+                except (OSError, TimeoutError):
                     pass
+                finally:
+                    connection.close()
             time.sleep(0.05)
         raise SandboxLifecycleError(
             f"Sandbox execd did not become ready within {timeout_seconds} seconds"
@@ -549,3 +576,7 @@ class DockerSandboxLifecycle:
             if parsed is not None and parsed.year > 1:
                 return parsed
         return None
+
+
+# Backward-compatible import while callers migrate to the runtime terminology.
+DockerSandboxLifecycle = DockerSandboxRuntime
