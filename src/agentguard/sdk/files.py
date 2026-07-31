@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 from pydantic import BaseModel
 
+from agentguard.sdk.endpoint import endpoint_base_url
+
 
 class FileType(StrEnum):
     FILE = "file"
@@ -27,6 +29,7 @@ class DirectoryEntry(BaseModel):
 @dataclass
 class FilesClient:
     endpoint: str
+    headers: dict[str, str] | None = None
     timeout_seconds: float = 30.0
     transport: httpx.AsyncBaseTransport | None = None
 
@@ -39,7 +42,7 @@ class FilesClient:
     ) -> None:
         async with self._client() as client:
             response = await client.post(
-                "/files/write",
+                "files/write",
                 json={"path": path, "content": content, "encoding": encoding},
             )
             response.raise_for_status()
@@ -52,7 +55,7 @@ class FilesClient:
     ) -> str:
         async with self._client() as client:
             response = await client.get(
-                "/files/read",
+                "files/read",
                 params={"path": path, "encoding": encoding},
             )
             response.raise_for_status()
@@ -72,25 +75,26 @@ class FilesClient:
             ("file", (path.rsplit("/", 1)[-1] or "file", data, "application/octet-stream")),
         ]
         async with self._client() as client:
-            response = await client.post("/files/upload", files=files)
+            response = await client.post("files/upload", files=files)
             response.raise_for_status()
 
     async def download_file(self, path: str) -> bytes:
         async with self._client() as client:
-            response = await client.get("/files/download", params={"path": path})
+            response = await client.get("files/download", params={"path": path})
             response.raise_for_status()
             return response.content
 
     async def list_directory(self, path: str) -> list[DirectoryEntry]:
         async with self._client() as client:
-            response = await client.get("/directories/list", params={"path": path})
+            response = await client.get("directories/list", params={"path": path})
             response.raise_for_status()
             payload = response.json()
             return [DirectoryEntry.model_validate(entry) for entry in payload["entries"]]
 
     def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=f"http://{self.endpoint}",
+            base_url=endpoint_base_url(self.endpoint),
+            headers=self.headers,
             timeout=self.timeout_seconds,
             transport=self.transport,
             trust_env=False,

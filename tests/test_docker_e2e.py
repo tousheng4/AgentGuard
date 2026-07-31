@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from agentguard.config import AppSettings, IngressSettings
 from agentguard.server.app import create_app
 from agentguard.server.sandbox.docker import DockerSandboxRuntime
 
@@ -18,7 +19,10 @@ pytestmark = pytest.mark.skipif(
 
 def test_real_docker_create_write_execute_and_delete() -> None:
     runtime = DockerSandboxRuntime()
-    application = create_app(runtime=runtime)
+    application = create_app(
+        settings=AppSettings(ingress=IngressSettings(enabled=True)),
+        runtime=runtime,
+    )
 
     with TestClient(application) as client:
         create_response = client.post(
@@ -74,6 +78,41 @@ def test_real_docker_create_write_execute_and_delete() -> None:
                 "execution_complete",
             ]
             assert events[1]["text"] == "agentguard-docker-e2e\n"
+
+            proxy_endpoint_response = client.get(
+                f"/v1/sandboxes/{sandbox_id}/endpoints/44772",
+                params={"use_server_proxy": "true"},
+            )
+            assert proxy_endpoint_response.status_code == 200
+            assert proxy_endpoint_response.json()["endpoint"].endswith(
+                f"/v1/sandboxes/{sandbox_id}/proxy/44772"
+            )
+
+            proxy_ping = client.get(
+                f"/v1/sandboxes/{sandbox_id}/proxy/44772/ping"
+            )
+            assert proxy_ping.status_code == 200
+            assert proxy_ping.json() == {"status": "ok"}
+
+            proxy_write = client.post(
+                f"/v1/sandboxes/{sandbox_id}/proxy/44772/files/write",
+                json={
+                    "path": "/workspace/ingress-e2e.py",
+                    "content": "print('agentguard-ingress-e2e')\n",
+                },
+            )
+            assert proxy_write.status_code == 200
+
+            proxy_command = client.post(
+                f"/v1/sandboxes/{sandbox_id}/proxy/44772/command",
+                json={
+                    "command": "python /workspace/ingress-e2e.py",
+                    "cwd": "/workspace",
+                    "timeout_seconds": 10,
+                },
+            )
+            assert proxy_command.status_code == 200
+            assert '"text":"agentguard-ingress-e2e\\n"' in proxy_command.text
 
             tool_response = client.post(
                 "/tools/shell/exec",

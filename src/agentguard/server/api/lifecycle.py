@@ -147,16 +147,35 @@ def renew_sandbox_expiration(
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/sandboxes/{sandbox_id}/endpoints/{port}", response_model=SandboxEndpoint)
+@router.get(
+    "/sandboxes/{sandbox_id}/endpoints/{port}",
+    response_model=SandboxEndpoint,
+    response_model_exclude_none=True,
+)
 def get_sandbox_endpoint(
+    request: Request,
     sandbox_id: str,
     port: int,
     service: Annotated[SandboxRuntime, Depends(get_lifecycle_service)],
+    use_server_proxy: bool = False,
 ) -> SandboxEndpoint:
     if port < 1 or port > 65535:
         raise HTTPException(status_code=400, detail="port must be between 1 and 65535")
     try:
-        return service.endpoint(sandbox_id, port)
+        endpoint = service.endpoint(sandbox_id, port)
+        if not use_server_proxy:
+            return endpoint
+        settings = request.app.state.settings
+        if not settings.ingress.enabled:
+            raise HTTPException(status_code=400, detail="ingress is not enabled")
+        address = settings.ingress.public_address or request.url.netloc
+        root_path = request.scope.get("root_path", "").rstrip("/")
+        return SandboxEndpoint(
+            endpoint=(
+                f"{address}{root_path}/v1/sandboxes/"
+                f"{sandbox_id}/proxy/{port}"
+            )
+        )
     except SandboxNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SandboxEndpointUnavailableError as exc:

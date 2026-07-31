@@ -13,6 +13,7 @@ def _build_docker_runtime(settings: AppSettings) -> SandboxRuntime:
         data_dir=settings.docker.data_dir,
         execd_ready_timeout_seconds=settings.docker.execd_ready_timeout_seconds,
         bind_host=settings.docker.bind_host,
+        proxy_host=settings.docker.proxy_host,
     )
 
 

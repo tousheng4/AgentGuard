@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Protocol, runtime_checkable
 
 from agentguard.server.sandbox.models import (
@@ -20,6 +21,11 @@ class RuntimeCapabilities:
     direct_endpoints: bool = False
     expiration: bool = False
     runtime_injection: bool = False
+
+
+class EndpointPurpose(StrEnum):
+    PUBLIC = "public"
+    PROXY = "proxy"
 
 
 @runtime_checkable
@@ -55,7 +61,13 @@ class SandboxRuntime(Protocol):
         timeout_seconds: int,
     ) -> RenewSandboxExpirationResponse: ...
 
-    def endpoint(self, sandbox_id: str, port: int) -> SandboxEndpoint: ...
+    def endpoint(
+        self,
+        sandbox_id: str,
+        port: int,
+        *,
+        purpose: EndpointPurpose = EndpointPurpose.PUBLIC,
+    ) -> SandboxEndpoint: ...
 
     def close(self) -> None: ...
 

@@ -33,7 +33,7 @@ from agentguard.server.sandbox.models import (
     SandboxState,
     SandboxStatus,
 )
-from agentguard.server.sandbox.service import RuntimeCapabilities
+from agentguard.server.sandbox.service import EndpointPurpose, RuntimeCapabilities
 
 EXECD_PORT = DEFAULT_EXECD_PORT
 SANDBOX_ID_LABEL = "agentguard.sandbox.id"
@@ -59,6 +59,7 @@ class DockerSandboxRuntime:
         data_dir: str | Path | None = None,
         execd_ready_timeout_seconds: float = 5.0,
         bind_host: str = "127.0.0.1",
+        proxy_host: str = "127.0.0.1",
     ) -> None:
         self._default_image = default_image or os.environ.get(
             "AGENTGUARD_SANDBOX_IMAGE",
@@ -72,6 +73,7 @@ class DockerSandboxRuntime:
         )
         self._execd_ready_timeout_seconds = execd_ready_timeout_seconds
         self._bind_host = bind_host
+        self._proxy_host = proxy_host
         root = Path(data_dir or os.environ.get("AGENTGUARD_DATA_DIR", "data"))
         self._expiration_manager = ExpirationManager(
             root / "sandbox-expirations.json",
@@ -269,7 +271,13 @@ class DockerSandboxRuntime:
         self._expiration_manager.schedule(sandbox_id, expires_at)
         return RenewSandboxExpirationResponse(expires_at=expires_at)
 
-    def endpoint(self, sandbox_id: str, port: int) -> SandboxEndpoint:
+    def endpoint(
+        self,
+        sandbox_id: str,
+        port: int,
+        *,
+        purpose: EndpointPurpose = EndpointPurpose.PUBLIC,
+    ) -> SandboxEndpoint:
         if port < 1 or port > 65535:
             raise SandboxLifecycleError("port must be between 1 and 65535")
 
@@ -290,7 +298,9 @@ class DockerSandboxRuntime:
 
         binding = bindings[0]
         host_ip = binding.get("HostIp") or "127.0.0.1"
-        if host_ip in {"0.0.0.0", "::"}:
+        if purpose is EndpointPurpose.PROXY:
+            host_ip = self._proxy_host
+        elif host_ip in {"0.0.0.0", "::"}:
             host_ip = "127.0.0.1"
         return SandboxEndpoint(endpoint=f"{host_ip}:{binding['HostPort']}")
 

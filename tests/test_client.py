@@ -122,6 +122,63 @@ async def test_client_create_run_kill_flow() -> None:
 
 
 @pytest.mark.asyncio
+async def test_client_uses_server_proxy_endpoint_and_headers() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST" and request.url.path == "/v1/sandboxes":
+            return httpx.Response(201, json=sandbox_payload())
+        if request.url.path == "/v1/sandboxes/sandbox-1/endpoints/44772":
+            assert request.url.params["use_server_proxy"] == "true"
+            return httpx.Response(
+                200,
+                json={
+                    "endpoint": (
+                        "agentguard.local/v1/sandboxes/"
+                        "sandbox-1/proxy/44772"
+                    ),
+                    "headers": {"X-Endpoint-Route": "route-1"},
+                },
+            )
+        if request.url.path.endswith("/proxy/44772/ping"):
+            return httpx.Response(200, json={"status": "ok"})
+        if request.url.path.endswith("/proxy/44772/command"):
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                content=(
+                    'data: {"type":"init","text":"execution-1","timestamp":1}\n\n'
+                    'data: {"type":"execution_complete","execution_time":1,'
+                    '"timestamp":2}\n\n'
+                ),
+            )
+        return httpx.Response(404)
+
+    client = AgentGuardClient(
+        "http://agentguard.local",
+        api_key="a-secure-api-key",
+        transport=httpx.MockTransport(handler),
+    )
+    sandbox = await client.create_sandbox(use_server_proxy=True)
+    execution = await sandbox.commands.run("true")
+
+    assert execution.exit_code == 0
+    data_plane_requests = [
+        request
+        for request in requests
+        if "/proxy/44772/" in request.url.path
+    ]
+    assert [request.url.path for request in data_plane_requests] == [
+        "/v1/sandboxes/sandbox-1/proxy/44772/ping",
+        "/v1/sandboxes/sandbox-1/proxy/44772/command",
+    ]
+    for request in data_plane_requests:
+        assert request.headers["X-Endpoint-Route"] == "route-1"
+        assert request.headers["AgentGuard-API-Key"] == "a-secure-api-key"
+
+
+@pytest.mark.asyncio
 async def test_commands_client_dispatches_streaming_handlers() -> None:
     messages: list[tuple[str, str]] = []
 

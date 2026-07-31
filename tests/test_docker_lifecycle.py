@@ -13,6 +13,7 @@ from agentguard.server.sandbox.docker import (
     SandboxLifecycleError,
 )
 from agentguard.server.sandbox.models import CreateSandboxRequest, SandboxState
+from agentguard.server.sandbox.service import EndpointPurpose
 
 
 class FakeContainer:
@@ -123,6 +124,7 @@ def test_docker_create_injects_runtime_and_maps_lifecycle(
     lifecycle = DockerSandboxLifecycle(
         docker_client=client,
         data_dir=tmp_path,
+        proxy_host="proxy.internal",
     )
     lifecycle._wait_for_execd = lambda container: None  # type: ignore[method-assign]
 
@@ -153,6 +155,11 @@ def test_docker_create_injects_runtime_and_maps_lifecycle(
     assert sandbox.state == SandboxState.RUNNING
     assert sandbox.metadata == {"task": "test"}
     assert sandbox.exposed_ports == [8080, 44772]
+    assert lifecycle.endpoint(
+        sandbox.id,
+        8080,
+        purpose=EndpointPurpose.PROXY,
+    ).endpoint.startswith("proxy.internal:")
 
     listed = lifecycle.list_sandboxes(metadata={"task": "test"})
     assert listed.total_items == 1

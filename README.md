@@ -51,11 +51,86 @@ export AGENTGUARD_DOCKER__IMAGE=agentguard-sandbox:latest
 export AGENTGUARD_DOCKER__DATA_DIR=data
 export AGENTGUARD_DOCKER__EXECD_READY_TIMEOUT_SECONDS=5
 export AGENTGUARD_DOCKER__BIND_HOST=127.0.0.1
+export AGENTGUARD_DOCKER__PROXY_HOST=127.0.0.1
 ```
 
 未配置时使用上述默认值。生命周期 API、工具网关和 Python SDK 不依赖具体后端；
 后续新增 runtime 只需实现 `SandboxRuntime`，按需实现 `SandboxCommandRunner`，
 并通过 `register_runtime()` 接入 factory。
+
+## Ingress
+
+AgentGuard Server 可以作为 sandbox HTTP/WebSocket ingress。默认关闭，启用方式：
+
+```bash
+export AGENTGUARD_INGRESS__ENABLED=true
+export AGENTGUARD_INGRESS__PUBLIC_ADDRESS=127.0.0.1:8000
+```
+
+Ingress 对外监听时应同时配置下文的 API key；无 API key 启动会记录安全警告。
+
+请求 server-proxy endpoint：
+
+```bash
+curl \
+  "http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/endpoints/8080?use_server_proxy=true"
+```
+
+返回的 endpoint 形如：
+
+```text
+127.0.0.1:8000/v1/sandboxes/<sandbox-id>/proxy/8080
+```
+
+也可以直接访问：
+
+```bash
+curl \
+  "http://127.0.0.1:8000/v1/sandboxes/<sandbox-id>/proxy/8080/api/health"
+```
+
+代理支持 HTTP streaming、SSE 和 WebSocket，并且只允许访问创建 sandbox 时声明的
+端口。`Authorization`、Cookie、API key、hop-by-hop headers 和客户端伪造的
+`X-Forwarded-*` 不会发送给 sandbox。
+
+Controller 运行在 Docker 内时，需要将 `AGENTGUARD_DOCKER__PROXY_HOST` 设置为
+Controller 可访问的 Docker host，例如 Docker Desktop 的
+`host.docker.internal`。
+
+Python SDK 可以直接使用 ingress：
+
+```python
+sandbox = await client.create_sandbox(
+    "python:3.11-slim",
+    use_server_proxy=True,
+)
+```
+
+### API key
+
+为控制面和 ingress 配置全局 API key：
+
+```bash
+export AGENTGUARD_SERVER__API_KEY="replace-with-at-least-16-characters"
+```
+
+HTTP 请求使用：
+
+```text
+AgentGuard-API-Key: <key>
+```
+
+SDK 使用：
+
+```python
+client = AgentGuardClient(
+    "http://127.0.0.1:8000",
+    api_key="replace-with-at-least-16-characters",
+)
+```
+
+`/health`、`/docs`、`/openapi.json` 和 `/redoc` 保持公开。API key 不会被代理到
+sandbox 后端。
 
 ## 构建沙箱镜像
 

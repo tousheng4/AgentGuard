@@ -82,6 +82,7 @@ class SandboxInfo(BaseModel):
 
 class SandboxEndpoint(BaseModel):
     endpoint: str
+    headers: dict[str, str] | None = None
 
 
 class SandboxListResponse(BaseModel):

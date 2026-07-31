@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 
 from agentguard.constants import DEFAULT_EXECD_PORT
+from agentguard.sdk.endpoint import endpoint_url
 from agentguard.sdk.execution import (
     Execution,
     ExecutionComplete,
@@ -16,6 +17,7 @@ from agentguard.sdk.execution import (
     OutputMessage,
 )
 from agentguard.sdk.files import FilesClient
+from agentguard.server.auth import API_KEY_HEADER
 from agentguard.server.sandbox.models import (
     RenewSandboxExpirationResponse,
     SandboxEndpoint,
@@ -28,6 +30,7 @@ from agentguard.server.sandbox.models import (
 @dataclass
 class CommandsClient:
     endpoint: str
+    headers: dict[str, str] | None = None
     timeout_seconds: float = 30.0
     transport: httpx.AsyncBaseTransport | None = None
 
@@ -52,13 +55,14 @@ class CommandsClient:
         ) as client:
             async with client.stream(
                 "POST",
-                f"http://{self.endpoint}/command",
+                endpoint_url(self.endpoint, "command"),
                 json={
                     "command": command,
                     "cwd": cwd,
                     "timeout_seconds": timeout_seconds,
                 },
                 headers={
+                    **(self.headers or {}),
                     "Accept": "text/event-stream",
                     "Cache-Control": "no-cache",
                 },
@@ -171,8 +175,17 @@ class Sandbox:
         self.info.expires_at = response.expires_at
         return response
 
-    async def get_endpoint(self, port: int) -> SandboxEndpoint:
-        return await self._client.get_sandbox_endpoint(self.id, port)
+    async def get_endpoint(
+        self,
+        port: int,
+        *,
+        use_server_proxy: bool = False,
+    ) -> SandboxEndpoint:
+        return await self._client.get_sandbox_endpoint(
+            self.id,
+            port,
+            use_server_proxy=use_server_proxy,
+        )
 
 
 class AgentGuardClient:
@@ -181,9 +194,11 @@ class AgentGuardClient:
         base_url: str = "http://127.0.0.1:8000",
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._transport = transport
+        self._api_key = api_key
 
     async def create_sandbox(
         self,
@@ -195,6 +210,7 @@ class AgentGuardClient:
         metadata: dict[str, str] | None = None,
         resource_limits: SandboxResourceLimits | None = None,
         exposed_ports: list[int] | None = None,
+        use_server_proxy: bool = False,
     ) -> Sandbox:
         async with self._control_client() as client:
             create_response = await client.post(
@@ -215,18 +231,34 @@ class AgentGuardClient:
             info = SandboxInfo.model_validate(create_response.json())
 
             endpoint_response = await client.get(
-                f"/v1/sandboxes/{info.id}/endpoints/{DEFAULT_EXECD_PORT}"
+                f"/v1/sandboxes/{info.id}/endpoints/{DEFAULT_EXECD_PORT}",
+                params={"use_server_proxy": use_server_proxy},
             )
             endpoint_response.raise_for_status()
-            endpoint = endpoint_response.json()["endpoint"]
+            resolved_endpoint = SandboxEndpoint.model_validate(
+                endpoint_response.json()
+            )
+            if use_server_proxy and self._api_key:
+                resolved_endpoint.headers = {
+                    **(resolved_endpoint.headers or {}),
+                    API_KEY_HEADER: self._api_key,
+                }
 
-        await self._wait_for_execd(endpoint)
+        await self._wait_for_execd(resolved_endpoint)
 
         return Sandbox(
             id=info.id,
             info=info,
-            commands=CommandsClient(endpoint=endpoint, transport=self._transport),
-            files=FilesClient(endpoint=endpoint, transport=self._transport),
+            commands=CommandsClient(
+                endpoint=resolved_endpoint.endpoint,
+                headers=resolved_endpoint.headers,
+                transport=self._transport,
+            ),
+            files=FilesClient(
+                endpoint=resolved_endpoint.endpoint,
+                headers=resolved_endpoint.headers,
+                transport=self._transport,
+            ),
             _client=self,
         )
 
@@ -282,10 +314,13 @@ class AgentGuardClient:
         self,
         sandbox_id: str,
         port: int,
+        *,
+        use_server_proxy: bool = False,
     ) -> SandboxEndpoint:
         async with self._control_client() as client:
             response = await client.get(
-                f"/v1/sandboxes/{sandbox_id}/endpoints/{port}"
+                f"/v1/sandboxes/{sandbox_id}/endpoints/{port}",
+                params={"use_server_proxy": use_server_proxy},
             )
             response.raise_for_status()
             return SandboxEndpoint.model_validate(response.json())
@@ -297,7 +332,7 @@ class AgentGuardClient:
 
     async def _wait_for_execd(
         self,
-        endpoint: str,
+        endpoint: SandboxEndpoint,
         *,
         attempts: int = 50,
         interval_seconds: float = 0.1,
@@ -310,7 +345,10 @@ class AgentGuardClient:
         ) as client:
             for attempt in range(attempts):
                 try:
-                    response = await client.get(f"http://{endpoint}/ping")
+                    response = await client.get(
+                        endpoint_url(endpoint.endpoint, "ping"),
+                        headers=endpoint.headers,
+                    )
                     response.raise_for_status()
                     return
                 except httpx.HTTPError as exc:
@@ -318,7 +356,9 @@ class AgentGuardClient:
                     if attempt + 1 < attempts:
                         await asyncio.sleep(interval_seconds)
 
-        raise RuntimeError(f"execd at {endpoint} did not become ready") from last_error
+        raise RuntimeError(
+            f"execd at {endpoint.endpoint} did not become ready"
+        ) from last_error
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
         async with self._control_client() as client:
@@ -331,4 +371,9 @@ class AgentGuardClient:
             timeout=60.0,
             transport=self._transport,
             trust_env=False,
+            headers=(
+                {API_KEY_HEADER: self._api_key}
+                if self._api_key is not None
+                else None
+            ),
         )

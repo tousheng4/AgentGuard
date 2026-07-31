@@ -14,11 +14,17 @@ services:
 
     environment:
       AGENTGUARD_ENV: development
-      AGENTGUARD_SANDBOX_IMAGE: agentguard-sandbox:dev
+      AGENTGUARD_DOCKER__IMAGE: agentguard-sandbox:dev
+      AGENTGUARD_DOCKER__DATA_DIR: /app/data
+      AGENTGUARD_DOCKER__PROXY_HOST: host.docker.internal
+      AGENTGUARD_INGRESS__ENABLED: "true"
       DOCKER_HOST: unix:///var/run/docker.sock
     
     group_add:
       - "0"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     volumes:
       # 宿主机修改源码后，容器立即看到变化。
